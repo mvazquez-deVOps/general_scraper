@@ -38,6 +38,8 @@ class TesisRecord:
     epoca: str
     url_detalle: str
     url_listado: str = ""
+    fuente: str = ""
+    indice: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
     scraped_at: str = ""
 

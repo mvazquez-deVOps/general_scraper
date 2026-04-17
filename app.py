@@ -25,15 +25,44 @@ import trafilatura
 from playwright.sync_api import sync_playwright
 from pypdf import PdfReader
 
+from site_mapping import (
+    build_config_mapa_payload,
+    load_config_mapa,
+    load_site_map,
+    resolve_extraction_url_with_config,
+    run_bj_canonical_preview,
+    run_site_mapping_flow,
+    save_config_mapa,
+    save_site_map,
+)
+
+from scjn_tesis.bj_fuentes_catalog import (
+    etiqueta_indice_por_slug,
+    fuente_api_desde_ui,
+    indices_para_fuente,
+    listar_fuentes_ui,
+)
+
+from scjn_tesis.buscador_juridico import scrape_buscador_juridico
+from scjn_tesis.models import SearchParams, TesisRecord
+
 # --- Rutas y constantes ---
 BASE_DIR = Path(__file__).resolve().parent
 ALMACEN_DIR = BASE_DIR / "almacen"
 ALMACEN_DIR.mkdir(parents=True, exist_ok=True)
+PDFS_DIR = ALMACEN_DIR / "pdfs"
+PDFS_DIR.mkdir(parents=True, exist_ok=True)
 
 PAGE_HOME = "inicio"
 PAGE_EXTRAER = "extraer"
 PAGE_ENTRENAR = "entrenar"
 PAGE_ALMACEN = "almacen"
+PAGE_MAPEAR = "mapear"
+
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_MAP_PNG = DATA_DIR / "temp_map.png"
+TEMP_MAP_PREVIEW_PNG = DATA_DIR / "temp_map_preview.png"
 
 MODE_URL = "URL Directa"
 MODE_BUSQUEDA = "Búsqueda por Palabras"
@@ -294,6 +323,32 @@ def search_bing_first_result_url(query: str) -> str | None:
             browser.close()
 
 
+def guardar_registro_bj_almacen(record: TesisRecord) -> Path:
+    """JSON compatible con Entrenar: incluye fuente e índice para filtrar en fase 2."""
+    fecha = datetime.now().strftime("%Y-%m-%d")
+    ind_safe = re.sub(r'[<>:"/\\|?*]', "_", (record.indice or "tesis"))[:50]
+    fname = f"{fecha}_bj_{ind_safe}_{record.numero_registro}.json"
+    path = ALMACEN_DIR / fname
+    payload = {
+        "url": record.url_detalle,
+        "fecha": datetime.now().isoformat(timespec="seconds"),
+        "titulo": (record.rubro or "")[:500],
+        "texto": record.texto_tesis,
+        "fuente": record.fuente,
+        "indice": record.indice,
+        "source": record.source,
+        "numero_registro": record.numero_registro,
+        "organo_emisor": record.organo_emisor,
+        "epoca": record.epoca,
+        "url_listado": record.url_listado,
+        "extra": record.extra,
+        "scraped_at": record.scraped_at,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    log_step(f"Registro BJ guardado: {path}")
+    return path
+
+
 def guardar_json_almacen(url_ref: str, texto: str, titulo: str) -> Path:
     """Guarda extracción en JSON bajo almacen/."""
     log_step("Guardando en almacén (JSON)...")
@@ -325,11 +380,28 @@ def listar_almacen_json() -> list[Path]:
     return sorted(ALMACEN_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def listar_almacen_json_entrenamiento() -> list[Path]:
+    """Excluye configuración de mapa; no es un JSON de texto extraído."""
+    skip = {"mapa_scjn.json", "config_mapa.json"}
+    return [p for p in listar_almacen_json() if p.name not in skip]
+
+
 def init_session() -> None:
     if "pagina" not in st.session_state:
         st.session_state.pagina = PAGE_HOME
     if "preview_almacen_file" not in st.session_state:
         st.session_state.preview_almacen_file = None
+    if "map_pending" not in st.session_state:
+        st.session_state.map_pending = None
+    if "map_bj_pending" not in st.session_state:
+        st.session_state.map_bj_pending = None
+    cfg0 = load_config_mapa(ALMACEN_DIR)
+    if "bj_bulk_fuente" not in st.session_state:
+        st.session_state.bj_bulk_fuente = (
+            str(cfg0.get("fuente_api") or cfg0.get("fuente") or "SJF") if cfg0 else "SJF"
+        )
+    if "bj_bulk_indice" not in st.session_state:
+        st.session_state.bj_bulk_indice = str(cfg0.get("indice") or "tesis") if cfg0 else "tesis"
 
 
 def ir(pagina: str) -> None:
@@ -346,7 +418,7 @@ def preview_snippet(text: str, max_chars: int = 400) -> str:
 def render_home() -> None:
     st.title("Extractor universal")
     st.markdown("### ¿Qué deseas hacer?")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         with st.container(border=True):
             st.markdown("#### Extraer")
@@ -360,6 +432,13 @@ def render_home() -> None:
             st.caption("Revisar texto desde el almacén o archivos subidos.")
             if st.button("Ir a Entrenar", key="btn_entrenar", use_container_width=True):
                 ir(PAGE_ENTRENAR)
+                st.rerun()
+    with c3:
+        with st.container(border=True):
+            st.markdown("#### Mapear Sitio")
+            st.caption("Previsualiza fuente/índice del Buscador Jurídico y confirma el mapa.")
+            if st.button("Ir a Mapear", key="btn_mapear", use_container_width=True):
+                ir(PAGE_MAPEAR)
                 st.rerun()
 
     st.markdown("")
@@ -382,6 +461,69 @@ def render_extraer() -> None:
         ir(PAGE_HOME)
         st.rerun()
 
+    with st.expander("Descarga masiva — Buscador Jurídico (bj.scjn.gob.mx)", expanded=False):
+        cfg_bulk = load_config_mapa(ALMACEN_DIR)
+        st.markdown(
+            "Paginación `page=1..N`, detección de fin de resultados, guardado por registro con "
+            "**fuente** e **índice**, y PDFs en `almacen/pdfs/`."
+        )
+        if cfg_bulk:
+            st.success(
+                "Hay **`almacen/config_mapa.json`**: los valores de fuente/índice y el modo PDF "
+                "provienen del mapeo confirmado en **Mapear sitio**."
+            )
+            st.caption(
+                f"Mapeo: **{cfg_bulk.get('fuente_ui', '?')}** · "
+                f"{cfg_bulk.get('indice_label', cfg_bulk.get('indice'))} · "
+                f"PDF directo: {cfg_bulk.get('pdf_directo', False)}"
+            )
+        dq = st.text_input("Palabra clave", key="bj_bulk_q", placeholder="pagare")
+        cf = st.text_input("Fuente", key="bj_bulk_fuente", placeholder="SJF")
+        ci = st.text_input("Índice", key="bj_bulk_indice", placeholder="tesis")
+        max_p = st.number_input("Máximo de páginas", min_value=1, max_value=500, value=5, key="bj_bulk_pages")
+        det = st.checkbox("Abrir cada detalle (más lento)", value=True, key="bj_bulk_detail")
+        bj_head = st.checkbox("Navegador visible (BJ masivo)", key="bj_bulk_headed")
+        prog = st.empty()
+        if st.button("Iniciar descarga masiva", type="primary", key="bj_bulk_run"):
+            if not dq or not dq.strip():
+                st.warning("Indica una palabra clave.")
+            else:
+                params = SearchParams(texto=dq.strip())
+
+                def on_prog(fuente: str, indice: str, page: int) -> None:
+                    line = f"Procesando Fuente: {fuente} | Índice: {indice} | Página: {page}"
+                    log_step(line)
+                    prog.markdown(
+                        f"Procesando **Fuente:** `{fuente}` | **Índice:** `{indice}` | **Página:** `{page}`"
+                    )
+
+                try:
+                    with st.spinner("Descargando…"):
+                        prefer_pdf = bool(cfg_bulk.get("pdf_directo")) if cfg_bulk else False
+                        records, fin_msg = scrape_buscador_juridico(
+                            params,
+                            max_pages=int(max_p),
+                            fetch_detail=det,
+                            headless=not bj_head,
+                            fuente=cf.strip() or "SJF",
+                            indice=ci.strip() or "tesis",
+                            pdfs_dir=PDFS_DIR,
+                            prefer_direct_pdf=prefer_pdf,
+                            log=log_step,
+                            on_progress=on_prog,
+                        )
+                    for rec in records:
+                        guardar_registro_bj_almacen(rec)
+                    prog.markdown(
+                        f"Procesando **Fuente:** `{cf}` | **Índice:** `{ci}` | **Listo.**"
+                    )
+                    if fin_msg:
+                        st.warning(fin_msg)
+                    st.success(f"Guardados {len(records)} registros en `./almacen` (PDFs en `./almacen/pdfs`).")
+                except Exception as e:
+                    log_step(f"BJ masivo: {e!r}")
+                    st.error(format_user_error(e))
+
     modo = st.radio(
         "Modo",
         [MODE_URL, MODE_BUSQUEDA],
@@ -393,6 +535,27 @@ def render_extraer() -> None:
         "Chrome instalado, Chromium embebido, modo visible y mezcla Trafilatura + texto del DOM. "
         "Recomendado: `playwright install chrome`. Pueden abrirse ventanas de Chromium unos segundos."
     )
+
+    site_map = load_site_map(ALMACEN_DIR)
+    cfg_mapa = load_config_mapa(ALMACEN_DIR)
+    if cfg_mapa:
+        st.info(
+            "Hay **`almacen/config_mapa.json`** (mapeo canónico del Buscador). "
+            "Con URL del Buscador Jurídico y palabra clave, se construye la URL de resultados con la **fuente** e **índice** confirmados."
+        )
+    if site_map:
+        st.info(
+            "Hay un **mapa legado** (`almacen/mapa_scjn.json`). "
+            "Si no aplica `config_mapa`, se usa como respaldo para la URL de resultados."
+        )
+    if cfg_mapa or site_map:
+        kw_map = st.text_input(
+            "Palabra clave (opcional, para aplicar mapa / Buscador Jurídico)",
+            placeholder="ej. amparo, tesis…",
+            key="extraer_kw_mapa",
+        )
+    else:
+        kw_map = ""
 
     if "ultimo_texto_extraido" not in st.session_state:
         st.session_state.ultimo_texto_extraido = ""
@@ -406,9 +569,13 @@ def render_extraer() -> None:
                 u = url_in.strip()
                 if not u.startswith(("http://", "https://")):
                     u = "https://" + u
+                target = resolve_extraction_url_with_config(u, kw_map or None, ALMACEN_DIR)
+                if target != u:
+                    log_step(f"URL ajustada por mapa: {target!r}")
+                    st.caption(f"Extrayendo resultados: `{target}`")
                 try:
                     with st.spinner("Extrayendo..."):
-                        texto, titulo, final_u = extract_with_playwright(u)
+                        texto, titulo, final_u = extract_with_playwright(target)
                         guardar_json_almacen(final_u, texto, titulo)
                         st.session_state.ultimo_texto_extraido = texto
                         st.success("Guardado en ./almacen")
@@ -447,6 +614,168 @@ def render_extraer() -> None:
         )
 
 
+def render_mapear() -> None:
+    st.header("Mapear sitio")
+    if st.button("← Volver al inicio", key="vol_map"):
+        ir(PAGE_HOME)
+        st.rerun()
+
+    tab_canon, tab_legacy = st.tabs(["Mapear sitio (Buscador SCJN)", "Mapeo manual (portada)"])
+
+    with tab_canon:
+        st.markdown(
+            "Elige **fuente** e **índice** del [Buscador Jurídico](https://bj.scjn.gob.mx/) y una palabra clave. "
+            "Se abre la **URL canónica** de resultados, se captura la zona de listado y, al confirmar, se guarda "
+            "`almacen/config_mapa.json` para que **Extraer** y la descarga masiva usen esos parámetros."
+        )
+        fuentes = listar_fuentes_ui()
+        fuente_ui = st.selectbox("Fuente", fuentes, key="map_bj_fuente")
+        opts = indices_para_fuente(fuente_ui)
+        slug_list = [s for s, _ in opts]
+        indice_slug = st.selectbox(
+            "Índice",
+            slug_list,
+            format_func=lambda s: etiqueta_indice_por_slug(fuente_ui, s),
+            key="map_bj_indice",
+        )
+        kw_bj = st.text_input("Palabra clave de prueba", placeholder="pagare", key="map_bj_kw")
+        headed_bj = st.checkbox(
+            "Mostrar navegador (headed, recomendado para validar)",
+            value=True,
+            key="map_bj_headed",
+        )
+        if st.button("Previsualizar resultados (captura)", type="primary", key="map_bj_run"):
+            if not kw_bj or not kw_bj.strip():
+                st.warning("Escribe una palabra clave de prueba.")
+            else:
+                try:
+                    api = fuente_api_desde_ui(fuente_ui)
+                    with st.spinner("Navegando al listado canónico y capturando…"):
+                        prev = run_bj_canonical_preview(
+                            fuente_api=api,
+                            indice=indice_slug,
+                            keyword=kw_bj.strip(),
+                            headed=headed_bj,
+                            log=log_step,
+                        )
+                        prev["fuente_ui"] = fuente_ui
+                        prev["indice_label"] = etiqueta_indice_por_slug(fuente_ui, indice_slug)
+                        st.session_state.map_bj_pending = prev
+                    st.success(
+                        f"Captura en `{TEMP_MAP_PREVIEW_PNG}`. Si ves tarjetas de resultados, el scraper masivo está alineado."
+                    )
+                except Exception as e:
+                    log_step(f"Mapeo canónico: {e!r}")
+                    st.error(format_user_error(e))
+
+        pending_bj = st.session_state.map_bj_pending
+        if TEMP_MAP_PREVIEW_PNG.is_file():
+            st.subheader("Vista del listado (última previsualización)")
+            st.image(str(TEMP_MAP_PREVIEW_PNG), use_container_width=True)
+
+        if pending_bj:
+            st.caption(f"URL canónica: `{pending_bj.get('canonical_url', '')}`")
+            if pending_bj.get("pdf_directo"):
+                st.warning(
+                    "Se detectó **enlace o respuesta PDF** en el resultado: la descarga masiva usará **descarga directa** "
+                    "de PDF en lugar de texto del listado."
+                )
+            for note in pending_bj.get("external_notes") or []:
+                st.warning(note)
+            if st.button("Confirmar mapeo de fuente", type="primary", key="map_bj_confirm"):
+                api = fuente_api_desde_ui(pending_bj.get("fuente_ui") or fuente_ui)
+                ind = pending_bj.get("indice") or indice_slug
+                payload = build_config_mapa_payload(
+                    fuente_ui=pending_bj.get("fuente_ui") or fuente_ui,
+                    fuente_api=api,
+                    indice=ind,
+                    indice_label=pending_bj.get("indice_label")
+                    or etiqueta_indice_por_slug(pending_bj.get("fuente_ui") or fuente_ui, ind),
+                    keyword_sample=str(pending_bj.get("keyword_sample") or kw_bj or ""),
+                    pdf_directo=bool(pending_bj.get("pdf_directo")),
+                    canonical_url=str(pending_bj.get("canonical_url") or ""),
+                )
+                save_config_mapa(ALMACEN_DIR, payload)
+                st.session_state.map_bj_pending = None
+                st.success(
+                    "Guardado en `almacen/config_mapa.json`. **Extraer** y la descarga masiva leerán esta configuración."
+                )
+                st.rerun()
+        elif load_config_mapa(ALMACEN_DIR):
+            st.caption(
+                "Ya existe `config_mapa.json`. Puedes previsualizar de nuevo y confirmar para sobrescribirlo."
+            )
+
+    with tab_legacy:
+        st.markdown(
+            "Indica la URL inicial (p. ej. portada del [Buscador Jurídico](https://bj.scjn.gob.mx/)) "
+            "y una palabra clave. El navegador intentará **buscar**, capturará la pantalla y podrás **confirmar** "
+            "el mapeo para que **Extraer** use la URL de resultados automáticamente (`mapa_scjn.json`)."
+        )
+
+        url_map = st.text_input(
+            "URL del sitio",
+            value="https://bj.scjn.gob.mx/",
+            key="map_url",
+        )
+        kw_map = st.text_input("Palabra clave de prueba", placeholder="amparo", key="map_kw")
+
+        with st.expander("Selectores CSS opcionales (avanzado)"):
+            css_in = st.text_input(
+                "Campo de búsqueda (CSS)",
+                placeholder="vacío = detección automática",
+                key="map_css_in",
+            )
+            css_sub = st.text_input(
+                "Botón enviar (CSS)",
+                placeholder="vacío = detección automática o Enter",
+                key="map_css_sub",
+            )
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            run_map = st.button("Ejecutar búsqueda y capturar pantalla", type="primary", key="map_run")
+        with col_b:
+            headed = st.checkbox("Mostrar navegador (headed)", key="map_headed")
+
+        if run_map:
+            if not kw_map or not kw_map.strip():
+                st.warning("Escribe una palabra clave de prueba.")
+            else:
+                try:
+                    with st.spinner("Navegando y capturando…"):
+                        payload = run_site_mapping_flow(
+                            start_url=url_map.strip(),
+                            keyword=kw_map.strip(),
+                            search_input_css=css_in.strip() or None,
+                            search_submit_css=css_sub.strip() or None,
+                            headless=not headed,
+                            log=log_step,
+                        )
+                        st.session_state.map_pending = payload
+                    st.success(f"Captura guardada en `{TEMP_MAP_PNG}`. Revisa la imagen y confirma si ves resultados.")
+                except Exception as e:
+                    log_step(f"Mapeo: {e!r}")
+                    st.error(format_user_error(e))
+
+        if TEMP_MAP_PNG.is_file():
+            st.subheader("Vista del robot (última captura — manual)")
+            st.image(str(TEMP_MAP_PNG), use_container_width=True)
+
+        pending = st.session_state.map_pending
+        if pending:
+            st.json(pending)
+            if st.button("Confirmar mapeo (legado)", type="primary", key="map_confirm"):
+                save_site_map(ALMACEN_DIR, pending)
+                st.session_state.map_pending = None
+                st.success(
+                    "Guardado en `almacen/mapa_scjn.json`. En **Extraer** → URL directa, usa la misma URL base y la palabra clave para ir al listado."
+                )
+                st.rerun()
+        elif load_site_map(ALMACEN_DIR):
+            st.caption("Ya existe un mapa legado guardado. Puedes ejecutar una nueva captura y confirmar para sobrescribirlo.")
+
+
 def render_entrenar() -> None:
     st.header("Entrenar")
     if st.button("← Volver al inicio", key="vol_ent"):
@@ -463,7 +792,11 @@ def render_entrenar() -> None:
     )
 
     if opcion.startswith("Opción A"):
-        archivos = listar_almacen_json()
+        st.caption(
+            "Los JSON de descarga masiva del Buscador incluyen **fuente** e **índice**; "
+            "puedes reconocerlos por el nombre `YYYY-MM-DD_bj_<índice>_<registro>.json`."
+        )
+        archivos = listar_almacen_json_entrenamiento()
         if not archivos:
             st.info("No hay archivos JSON en ./almacen. Extrae contenido primero.")
         else:
@@ -551,6 +884,8 @@ def main() -> None:
         render_entrenar()
     elif pagina == PAGE_ALMACEN:
         render_almacen()
+    elif pagina == PAGE_MAPEAR:
+        render_mapear()
     else:
         st.session_state.pagina = PAGE_HOME
         st.rerun()

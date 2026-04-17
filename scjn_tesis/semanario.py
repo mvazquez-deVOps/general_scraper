@@ -193,6 +193,8 @@ def scrape_semanario(
                 texto_tesis=texto,
                 organo_emisor=row["organo_emisor"],
                 epoca=row["epoca"],
+                fuente="SJF",
+                indice="tesis",
                 url_detalle=f"https://sjf2.scjn.gob.mx/detalle/tesis/{reg}",
                 url_listado=base_list,
                 extra={

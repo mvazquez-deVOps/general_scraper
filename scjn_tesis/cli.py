@@ -75,12 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if args.source == "bj":
-        items = scrape_buscador_juridico(
+        items, fin = scrape_buscador_juridico(
             params,
             max_pages=args.max_pages,
             fetch_detail=fetch_detail,
             headless=headless,
         )
+        if fin:
+            meta["fin_paginacion"] = fin
     else:
         items = scrape_semanario(
             params,
@@ -91,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
 
     save_json(args.out, items, meta=meta)
     print(f"Guardado: {args.out} ({len(items)} registros)", file=sys.stderr)
+    if args.source == "bj" and meta.get("fin_paginacion"):
+        print(meta["fin_paginacion"], file=sys.stderr)
     return 0
 
 
