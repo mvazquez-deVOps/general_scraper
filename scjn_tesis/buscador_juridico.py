@@ -4,7 +4,7 @@ Buscador Jurídico — https://bj.scjn.gob.mx/
 Selectores probados (Angular):
 - Tarjetas de resultado: div.card.mb-1 (contiene "Registro digital:")
 - Paginación URL: &page=N
-- Detalle: criterio en ``.text-container-html`` (vista tesis); respaldo ``.documento-content`` y recorte body.
+- Detalle: ``.text-container-html`` + ``.additional-text`` (notas/votaciones); respaldo ``.documento-content`` y body.
 """
 
 from __future__ import annotations
@@ -69,8 +69,10 @@ def _parse_bj_card_text(card_text: str) -> dict[str, str]:
     }
 
 
-# Criterio: fragmentos en `.text-container-html` (p, span) dentro de `app-view-tesis`.
+# Fragmentos del detalle BJ (Angular): criterio + notas/votaciones al final.
 _TEXT_CONTAINER = ".text-container-html"
+_ADDITIONAL_TEXT = ".additional-text"
+# Fragmentos principales del detalle: `.text-container-html`, `.additional-text`.
 
 # Respaldo si no hay contenedores HTML: `.documento-content` y anteriores.
 _TESIS_CONTAINERS = (".documento-content", ".texto-tesis", "#divDetalle", ".cuerpo-tesis")
@@ -162,8 +164,11 @@ def _inner_texto_from_text_container_html(
 ) -> str | None:
     """
     Concatenación de todos los `.text-container-html` (orden de documento),
-    con encabezado (hasta el 1.º contenedor) y rubro vía .rubro-tesis / strong si aplica.
-    No usa el body entero. Si do_wait, espera 20s a visibilidad y texto mínimo.
+    encabezado hasta el 1.º contenedor y rubro vía .rubro-tesis / strong si aplica.
+    Al final concatena todos los `.additional-text` (notas, jurisprudencia, votaciones).
+    Los bloques `.additional-text` pasan por `clean_legal_artifacts` antes de unir al cuerpo;
+    el resultado completo sigue procesándose en `_fetch_bj_detail` con trim + clean.
+    Si do_wait, espera 20s a visibilidad y texto mínimo en `.text-container-html`.
     """
     if do_wait:
         _wait_text_container_html_ready(page, log)
@@ -199,6 +204,28 @@ def _inner_texto_from_text_container_html(
             rubro[:20].lower()
         ):
             cuerpo = f"{rubro}\n\n{cuerpo}"
+
+    add_parts: list[str] = []
+    try:
+        aloc = page.locator(_ADDITIONAL_TEXT)
+        na = min(aloc.count(), 200)
+    except Exception as e:
+        log(f"additional-text count: {e!r}")
+        na = 0
+    for i in range(na):
+        try:
+            at = aloc.nth(i).inner_text(timeout=30_000)
+        except Exception as e:
+            log(f"inner_text {_ADDITIONAL_TEXT} [{i}]: {e!r}")
+            continue
+        at = (at or "").strip()
+        if at and at not in add_parts:
+            add_parts.append(at)
+    if add_parts:
+        add_blob = clean_legal_artifacts("\n\n".join(add_parts))
+        if add_blob.strip():
+            cuerpo = f"{cuerpo}\n\n{add_blob}"
+
     return cuerpo or None
 
 
@@ -572,8 +599,8 @@ def scrape_buscador_juridico(
 class BuscadorJuridicoAdapter:
     """
     Misma lógica que `scrape_buscador_juridico`.
-    Cada `TesisRecord.texto_tesis` con detalle BJ: primero ``.text-container-html`` (+ rubro
-    ``.rubro-tesis`` / ``strong``), luego ``.documento-content``; último, recorte ``Instancia:`` vía body.
+    Cada `TesisRecord.texto_tesis` con detalle BJ: ``.text-container-html`` + ``.additional-text``
+    (+ rubro ``.rubro-tesis`` / ``strong``), luego ``.documento-content``; último, recorte ``Instancia:`` vía body.
     """
 
     def search(
