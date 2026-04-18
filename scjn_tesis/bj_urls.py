@@ -86,6 +86,7 @@ def bj_documento_path(indice: str, registro: str) -> str:
     Ruta relativa /documento/{carpeta}/{id} según índice (heurística para BJ).
     """
     ind = (indice or "tesis").lower()
+    # Alias (índice listado → segmento en /documento/…); el BJ suele repetir el slug del índice.
     mapping = {
         "tesis": "tesis",
         "ejecutorias": "ejecutorias",
@@ -95,14 +96,28 @@ def bj_documento_path(indice: str, registro: str) -> str:
         "expedientes_pub": "expedientes_pub",
         "votos_sentencias_pub": "votos_sentencias_pub",
         "legislacion": "legislacion",
+        "biblioteca": "biblioteca",
         "vtaquigraficas": "vtaquigraficas",
+        "ccj_cursos": "ccj_cursos",
+        "comunicado": "comunicado",
+        "discursos_mp": "discursos_mp",
+        "resoluciones_pleno": "resoluciones_pleno",
         "cronicas": "cronicas",
+        "listas_sesion_pub": "listas_sesion_pub",
         "hudoc": "hudoc",
         "cidh": "cidh",
+        "cij": "cij",
+        "suniversal": "suniversal",
+        "bjdh_coidh": "bjdh_coidh",
+        "cadh": "cadh",
         "tcchile": "tcchile",
         "csjnargentina": "csjnargentina",
         "tcespanol": "tcespanol",
+        "cccolombia": "cccolombia",
+        "supremecourtusa": "supremecourtusa",
+        "corteuk": "corteuk",
+        "tcaleman": "tcaleman",
         "ccitaliana": "ccitaliana",
     }
-    carpeta = mapping.get(ind, "tesis")
+    carpeta = mapping.get(ind, ind or "tesis")
     return f"/documento/{carpeta}/{registro}"

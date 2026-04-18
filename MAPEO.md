@@ -65,7 +65,7 @@ SJF
 TÉSIS: https://bj.scjn.gob.mx/busqueda?fuente=SJF&indice=tesis&page=1&q=pagare&semantica=0
 VOTOS: https://bj.scjn.gob.mx/busqueda?fuente=SJF&indice=votos&page=1&q=pagare&semantica=0
 ACUERDOS: https://bj.scjn.gob.mx/busqueda?fuente=SJF&indice=acuerdos&page=1&q=pagare&semantica=0
-PRECEDENTES https://bj.scjn.gob.mx/busqueda?fuente=SJF&indice=ejecutorias&page=1&q=pagare&semantica=0
+PRECEDENTES: https://bj.scjn.gob.mx/busqueda?fuente=SJF&indice=ejecutorias&page=1&q=pagare&semantica=0
 SIJ
 SENTENCIAS: https://bj.scjn.gob.mx/busqueda?fuente=SIJ&indice=sentencias_pub&page=1&q=pagare&semantica=0
 EXPEDIENTES: https://bj.scjn.gob.mx/busqueda?fuente=SIJ&indice=expedientes_pub&page=1&q=pagare&semantica=0
@@ -79,12 +79,12 @@ CASA DE LA CULTURA JURÍDICA: https://bj.scjn.gob.mx/busqueda?fuente=Portal%20Ge
 COMUNICADOS: https://bj.scjn.gob.mx/busqueda?fuente=Portal%20General&indice=comunicado&page=1&q=pagare&semantica=0
 DISCURSOS PRESIDENCIA: https://bj.scjn.gob.mx/busqueda?fuente=Portal%20General&indice=discursos_mp&page=1&size=10&q=sexenio&semantica=0
 RESOLUCIONES DEL PLENO: https://bj.scjn.gob.mx/busqueda?fuente=Portal%20General&indice=resoluciones_pleno&page=1&size=10&q=PENAL&semantica=0
-INFORME DE LABORES:https://bj.scjn.gob.mx/busqueda?q=PENAL&page=1&semantica=0
+INFORME DE LABORES: https://bj.scjn.gob.mx/busqueda?q=PENAL&page=1&semantica=0
 CRÓNICAS: https://bj.scjn.gob.mx/busqueda?fuente=Portal%20General&indice=cronicas&page=1&q=pagare&semantica=0
 LISTAS OFICIALES: https://bj.scjn.gob.mx/busqueda?fuente=Portal%20General&indice=listas_sesion_pub&page=1&q=PENAL&semantica=0
 UNIDAD DE TRANSPARENCIA DE LA SCJN
 RESOLUCIONES SCJN: https://bj.scjn.gob.mx/busqueda?fuente=Unidad%20de%20Transparencia%20de%20la%20SCJN&indice=rest_api_transp_resoluciones_comite_transparencia&page=1&q=pagare&semantica=0
-RESOLUCIONES COMITÉ ESPECIALIZADO:https://bj.scjn.gob.mx/busqueda?q=PENAL&page=1&semantica=0
+RESOLUCIONES COMITÉ ESPECIALIZADO: https://bj.scjn.gob.mx/busqueda?q=PENAL&page=1&semantica=0
 ORGANOS INTERNACIONALES
 CORTE INTERAMERICANA DE DERECHOS HUMANOS: https://bj.scjn.gob.mx/busqueda?fuente=%C3%93rganos%20internacionales&indice=cidh&page=1&q=pagare&semantica=0
 CORTE EUROPEA DE DERECHOS HUMANOS: https://bj.scjn.gob.mx/busqueda?fuente=%C3%93rganos%20internacionales&indice=hudoc&page=1&q=pagare&semantica=0
@@ -99,7 +99,7 @@ TRIBUNAL CONSTITUCIONAL DE CHILE: https://bj.scjn.gob.mx/busqueda?fuente=Tribuna
 CORTE SUPREMA DE JUSTICIA DE ARGENTINA: https://bj.scjn.gob.mx/busqueda?fuente=Tribunales%20y%20Cortes%20Constitucionales&indice=csjnargentina&page=1&q=pagare&semantica=0
 TRIBUNAL CONSTITUCIONAL DE ESPAÑA: https://bj.scjn.gob.mx/busqueda?fuente=Tribunales%20y%20Cortes%20Constitucionales&indice=tcespanol&page=1&q=pagare&semantica=0
 SUPREMA CORTE DE ESTADOS UNIDOS DE AMÉRICA: https://bj.scjn.gob.mx/busqueda?fuente=Tribunales%20y%20Cortes%20Constitucionales&indice=supremecourtusa&page=1&q=PENAL&semantica=0
-SUPREMA CORTE DE REINO UNIDO:https://bj.scjn.gob.mx/busqueda?fuente=Tribunales%20y%20Cortes%20Constitucionales&indice=corteuk&page=1&q=PENAL&semantica=0
+SUPREMA CORTE DE REINO UNIDO: https://bj.scjn.gob.mx/busqueda?fuente=Tribunales%20y%20Cortes%20Constitucionales&indice=corteuk&page=1&q=PENAL&semantica=0
 TRIBUNAL CONSTITUCIONAL DE ALEMANIA: https://bj.scjn.gob.mx/busqueda?fuente=Tribunales%20y%20Cortes%20Constitucionales&indice=tcaleman&page=1&q=PENAL&semantica=0
 CORTE CONSTITUCIONAL DE ITALIA: https://bj.scjn.gob.mx/busqueda?fuente=Tribunales%20y%20Cortes%20Constitucionales&indice=ccitaliana&page=1&q=pagare&semantica=0
 
@@ -149,3 +149,11 @@ SUPREMA CORTE DE ESTADOS UNIDOS DE AMÉRICA / REGISTRO DIGITAL: https://api.capa
 SUPREMA CORTE DE REINO UNIDO /REGISTRO DIGITAL: https://bj.scjn.gob.mx/documento/corteuk/UKSC%25202022%252F0066
 TRIBUNAL CONSTITUCIONAL DE ALEMANIA / REGISTRO DIGITAL: https://bj.scjn.gob.mx/documento/corteuk/UKSC%25202022%252F00666
 CORTE CONSTITUCIONAL DE ITALIA / REGISTRO DIGITAL: https://www.cortecostituzionale.it/ricerca-pronunce
+
+---
+
+### Notas de revisión (código / consistencia)
+
+- **Búsqueda sin `fuente` e `indice`:** «Informe de labores» y «Resoluciones comité especializado» (listados) usan solo `q=`; el catálogo en la app no puede mapearlos a un par fuente+índice hasta que exista URL documentada con esos parámetros.
+- **Corte Penal Internacional:** en el listado no hay URL de `/busqueda` con índice; falta confirmar el slug `indice` en el BJ.
+- **Detalle Tribunales (posible errata):** en la sección de registros digitales, «Tribunal Constitucional de Alemania» apunta a la misma ruta `documento/corteuk/...` que «Suprema Corte de Reino Unido». Conviene verificar en el portal el detalle correcto para Alemania (`tcaleman`).
