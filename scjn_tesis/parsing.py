@@ -29,7 +29,50 @@ def extract_registro_digital(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+def clean_legal_artifacts(text: str) -> str:
+    """
+    Normaliza basura de render (SCJN / Angular): NBSP, espacios múltiples, saltos reiterados.
+    No altera el significado del fallo; solo mejora legibilidad y JSON.
+    """
+    if not text:
+        return text
+    t = text.replace("\xa0", " ").replace("\u200b", "").replace("\ufeff", "")
+    t = re.sub(r"[\t\u2000-\u200a\ufeff]+", " ", t)
+    t = re.sub(r" {2,}", " ", t)
+    t = re.sub(r" *\n *", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
 def trim_footer(text: str) -> str:
-    """Quita bloques típicos de pie de página SCJN."""
-    cut = re.split(r"\n\s*UBICACI[ÓO]N\s*\n", text, maxsplit=1, flags=re.I)
-    return cut[0].strip() if cut else text.strip()
+    """
+    Quita menús y pie de sitio SCJN solo si el bloque aparece al final del documento.
+    No hace un split global en la primera 'UBICACIÓN' (evita truncar criterios jurídicos).
+    """
+    t = text.rstrip()
+    if not t:
+        return t
+    n = len(t)
+    if n < 500:
+        return t
+
+    out = t
+    # Sólo inspeccionar el tramo final (p. ej. menú, dirección, redes)
+    start = int(n * 0.72)
+    tail = out[start:]
+
+    # Patrón: salto de párrafo real antes de un título de pie. El más arriba en el tramo gana.
+    pats = (
+        r"(?is)\n{2,}\s*UBICACI[ÓO]N\s*[\n\r]",
+        r"(?is)\n{2,}\s*CONT[ÁA]CTANOS?\s*[\n\r]",
+        r"(?is)\n{2,}\s*REDES\s+SOCIALES\s*[\n\r]",
+    )
+    best: int | None = None
+    for pat in pats:
+        m = re.search(pat, tail)
+        if m and (best is None or m.start() < best):
+            best = m.start()
+    if best is not None:
+        out = out[: start + best].rstrip()
+
+    return out.strip()

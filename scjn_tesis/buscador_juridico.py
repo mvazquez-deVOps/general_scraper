@@ -4,7 +4,7 @@ Buscador Jurídico — https://bj.scjn.gob.mx/
 Selectores probados (Angular):
 - Tarjetas de resultado: div.card.mb-1 (contiene "Registro digital:")
 - Paginación URL: &page=N
-- Detalle: /documento/{tipo}/{registro} según índice
+- Detalle: criterio en ``.text-container-html`` (vista tesis); respaldo ``.documento-content`` y recorte body.
 """
 
 from __future__ import annotations
@@ -24,7 +24,12 @@ from scjn_tesis.bj_urls import (
 from scjn_tesis.browser import launch_browser, new_context, settle_page
 from scjn_tesis.downloads import download_file, is_pdf_url, safe_pdf_filename
 from scjn_tesis.models import SearchParams, TesisRecord
-from scjn_tesis.parsing import extract_registro_digital, parse_organo_epoca_line, trim_footer
+from scjn_tesis.parsing import (
+    clean_legal_artifacts,
+    extract_registro_digital,
+    parse_organo_epoca_line,
+    trim_footer,
+)
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[str, str, int], None]
@@ -64,6 +69,241 @@ def _parse_bj_card_text(card_text: str) -> dict[str, str]:
     }
 
 
+# Criterio: fragmentos en `.text-container-html` (p, span) dentro de `app-view-tesis`.
+_TEXT_CONTAINER = ".text-container-html"
+
+# Respaldo si no hay contenedores HTML: `.documento-content` y anteriores.
+_TESIS_CONTAINERS = (".documento-content", ".texto-tesis", "#divDetalle", ".cuerpo-tesis")
+_TESIS_WAIT_SELECTORS = ", ".join(_TESIS_CONTAINERS)
+_RUBRO_SELECTORS = (".rubro-tesis", "app-view-tesis .rubro-tesis", "app-cuerpo-tesis .rubro-tesis")
+
+def _wait_text_container_html_ready(page: Page, log: LogFn) -> None:
+    """
+    Hasta 20s: existen nodos .text-container-html, visibles y con algo de texto
+    (no se usa el body entero en la ruta principal).
+    """
+    try:
+        page.wait_for_selector(_TEXT_CONTAINER, state="visible", timeout=20_000)
+    except Exception as e:
+        log(f"wait_for_selector {_TEXT_CONTAINER} (visible, 20s): {e!r}")
+    try:
+        page.wait_for_function(
+            r"""
+            () => {
+                for (const el of document.querySelectorAll('.text-container-html')) {
+                    if (el.offsetParent == null) continue;
+                    if ((el.innerText || "").trim().length > 3) { return true; }
+                }
+                return false;
+            }
+            """,
+            timeout=20_000,
+        )
+    except Exception as e:
+        log(f"wait_for_function .text-container-html con texto (20s): {e!r}")
+
+
+def _extract_rubro_bj_line(page: Page) -> str:
+    """Encabezado: clase .rubro-tesis o strong (vista tesis) cuando no queda en el cuerpo."""
+    for sel in _RUBRO_SELECTORS:
+        loc = page.locator(sel)
+        try:
+            n = loc.count()
+        except Exception:
+            n = 0
+        if n > 0:
+            t = loc.first.inner_text(timeout=5_000).strip()
+            if t and len(t) > 3:
+                return t
+    locs = page.locator("app-view-tesis strong")
+    try:
+        m = min(locs.count(), 10)
+    except Exception:
+        m = 0
+    for i in range(m):
+        t = locs.nth(i).inner_text(timeout=3_000).strip()
+        if t and 15 < len(t) < 600 and "\n" not in t and not t.lower().startswith("scjn"):
+            if "época" not in t.lower() and "materia" not in t.lower():
+                return t
+    return ""
+
+
+def _encabezado_antes_de_text_containers(page: Page) -> str:
+    """
+    Incluye Registro / Instancia / Materia que a menudo preceden a los
+    `p, span.text-container-html` (no van en body crudo, solo rango bajo
+    contenedor tesis).
+    """
+    try:
+        return (
+            page.evaluate(
+                r"""() => {
+                const first = document.querySelector('.text-container-html');
+                if (!first) { return ""; }
+                const root =
+                    (first.closest && (first.closest('.documento-content')
+                        || first.closest('app-view-tesis')
+                        || first.closest('app-cuerpo-tesis'))) || null;
+                if (!root || !root.contains(first)) { return ""; }
+                const r = document.createRange();
+                r.setStart(root, 0);
+                r.setEndBefore(first);
+                return (r.toString() || "").trim();
+            }""",
+            )
+            or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _inner_texto_from_text_container_html(
+    page: Page, log: LogFn, *, do_wait: bool = True
+) -> str | None:
+    """
+    Concatenación de todos los `.text-container-html` (orden de documento),
+    con encabezado (hasta el 1.º contenedor) y rubro vía .rubro-tesis / strong si aplica.
+    No usa el body entero. Si do_wait, espera 20s a visibilidad y texto mínimo.
+    """
+    if do_wait:
+        _wait_text_container_html_ready(page, log)
+    chunks: list[str] = []
+    try:
+        loc = page.locator(_TEXT_CONTAINER)
+        n = min(loc.count(), 200)
+    except Exception as e:
+        log(f"text-container count: {e!r}")
+        n = 0
+    for i in range(n):
+        try:
+            t = loc.nth(i).inner_text(timeout=30_000)
+        except Exception as e:
+            log(f"inner_text {_TEXT_CONTAINER} [{i}]: {e!r}")
+            continue
+        t = t.strip() if t else ""
+        if t and t not in chunks:
+            chunks.append(t)
+    cuerpo = "\n\n".join(chunks)
+    if not cuerpo.strip():
+        return None
+    pre = _encabezado_antes_de_text_containers(page)
+    if pre and pre[:200] not in cuerpo and not cuerpo.lstrip().lower().startswith(
+        pre[:40].lower().strip()[:20]
+    ):
+        cuerpo = f"{pre}\n\n{cuerpo}"
+    rubro = _extract_rubro_bj_line(page)
+    if rubro:
+        head = cuerpo.lstrip()[:200].lower()
+        rlow = rubro[:80].lower()
+        if rlow not in head and not cuerpo.strip().lower().startswith(
+            rubro[:20].lower()
+        ):
+            cuerpo = f"{rubro}\n\n{cuerpo}"
+    return cuerpo or None
+
+
+# Detalle: esperar texto sustantivo, no un shell de listado
+_MIN_CUERPO_SIN_SENAL = 500
+_MIN_CUERPO_CON_INSTANCIA = 200
+
+# Playwright: al menos un contenedor con criterio típico o bloque largo
+_RICH_TESIS_FUNCTION = r"""
+(sels) => {
+  const haveInstancia = (t) => t.includes('Instancia');
+  for (const s of sels) {
+    for (const el of document.querySelectorAll(s)) {
+      const t = (el.innerText || '').trim();
+      if (t.length >= 400 && haveInstancia(t)) { return true; }
+      if (t.length >= 2000) { return true; }
+    }
+  }
+  const b = (document.body && document.body.innerText) ? document.body.innerText : '';
+  return b.length >= 1500 && haveInstancia(b);
+}
+"""
+
+
+def _cuerpo_tesis_looks_complete(text: str | None) -> bool:
+    if not text or not (t := text.strip()):
+        return False
+    n = len(t)
+    if n < _MIN_CUERPO_CON_INSTANCIA:
+        return False
+    if "Instancia:" in t and n >= 250:
+        return True
+    if n >= _MIN_CUERPO_SIN_SENAL:
+        return True
+    return False
+
+
+def _pick_largest_tesis_node(page: Page, log: LogFn) -> str | None:
+    best_text = ""
+    best_key = (0, 0)  # (score, length)
+    for sel in _TESIS_CONTAINERS:
+        loc = page.locator(sel)
+        try:
+            n = min(loc.count(), 20)
+        except Exception:
+            n = 0
+        for i in range(n):
+            try:
+                el = loc.nth(i)
+                t = el.inner_text(timeout=60_000)
+            except Exception as e:
+                log(f"inner_text {sel}[{i}]: {e!r}")
+                continue
+            if not t:
+                continue
+            t = t.strip()
+            nch = len(t)
+            if nch < 30:
+                continue
+            # Prioridad: longitud, desempate si ya trae "Instancia:"
+            inst_boost = 50_000 if "Instancia:" in t else 0
+            key = (inst_boost + nch, nch)
+            if key > best_key:
+                best_key = key
+                best_text = t
+    return best_text if best_text else None
+
+
+def _wait_tesis_rich_and_visible(page: Page, log: LogFn) -> None:
+    try:
+        page.wait_for_selector(
+            _TESIS_WAIT_SELECTORS,
+            state="visible",
+            timeout=30_000,
+        )
+    except Exception as e:
+        log(f"wait_for_selector tesis (visible, 30s): {e!r}")
+    try:
+        page.wait_for_function(
+            _RICH_TESIS_FUNCTION,
+            arg=list(_TESIS_CONTAINERS),
+            timeout=25_000,
+        )
+    except Exception as e:
+        log(f"wait_for_function criterio/Instancia: {e!r}")
+
+
+def _inner_texto_tesis_contenedor(page: Page, log: LogFn) -> str | None:
+    _wait_tesis_rich_and_visible(page, log)
+    return _pick_largest_tesis_node(page, log)
+
+
+def _texto_tesis_from_body_page(page: Page, log: LogFn) -> str:
+    log("Respaldo detalle: body con recorte desde 'Instancia:' o texto depurado.")
+    body = page.locator("body").inner_text(timeout=60_000)
+    body = trim_footer(body)
+    m = re.search(
+        r"(?is)(Instancia:.*?)(?:UBICACI[ÓO]N|CONT[ÁA]CTANOS|REDES SOCIALES|$)",
+        body,
+    )
+    if m and len(m.group(1).strip()) > 200:
+        return m.group(1).strip()
+    return body.strip()
+
+
 def _collect_pdf_links(page: Page) -> list[str]:
     hrefs: list[str] = []
     try:
@@ -99,13 +339,49 @@ def _fetch_bj_detail(
     page.goto(url, wait_until="load")
     settle_page(page, headless=headless)
 
-    body = page.locator("body").inner_text(timeout=60_000)
-    body = trim_footer(body)
-    m = re.search(
-        r"(?is)(Instancia:.*?)(?:UBICACI[ÓO]N|CONT[ÁA]CTANOS|REDES SOCIALES|$)",
-        body,
-    )
-    texto = m.group(1).strip() if m else body.strip()
+    cuerpo = _inner_texto_from_text_container_html(page, log)
+    if not _cuerpo_tesis_looks_complete(cuerpo):
+        log("Reintento: scroll y relectura de .text-container-html…")
+        try:
+            page.evaluate(
+                "() => { window.scrollTo(0, Math.min(document.body.scrollHeight * 0.5, 2200)); }"
+            )
+        except Exception as e:
+            log(f"scroll: {e!r}")
+        time.sleep(1.0)
+        c2 = _inner_texto_from_text_container_html(page, log, do_wait=False)
+        if c2 and (not cuerpo or len(c2.strip()) > len((cuerpo or "").strip())):
+            cuerpo = c2
+
+    if not _cuerpo_tesis_looks_complete(cuerpo):
+        log("Ruta respaldo: contenedores .documento-content / tesis (sin body completo como primera opción).")
+        c3 = _inner_texto_tesis_contenedor(page, log)
+        if c3 and (not cuerpo or len(c3.strip()) > len((cuerpo or "").strip())):
+            cuerpo = c3
+    if not _cuerpo_tesis_looks_complete(cuerpo):
+        log("Reintento (documento-content): scroll…")
+        try:
+            page.evaluate(
+                "() => { window.scrollTo(0, Math.min(document.body.scrollHeight * 0.4, 1600)); }"
+            )
+        except Exception as e:
+            log(f"scroll: {e!r}")
+        time.sleep(1.2)
+        c4 = _pick_largest_tesis_node(page, log)
+        if c4 and (not cuerpo or len(c4.strip()) > len((cuerpo or "").strip())):
+            cuerpo = c4
+        if not _cuerpo_tesis_looks_complete(cuerpo):
+            cuerpo = None
+
+    if cuerpo is not None and _cuerpo_tesis_looks_complete(cuerpo):
+        texto = clean_legal_artifacts(trim_footer(cuerpo))
+    else:
+        if cuerpo and not _cuerpo_tesis_looks_complete(cuerpo):
+            log("Cuerpo BJ por debajo de umbral o sin señal 'Instancia:'; se respalda con recorte de body (Instancia:).")
+        else:
+            log("Sin cuerpo útil; se respalda con recorte de body (Instancia:), no con body crudo ruidoso.")
+        raw = _texto_tesis_from_body_page(page, log)
+        texto = clean_legal_artifacts(raw)
 
     if pdfs_dir:
         for href in _collect_pdf_links(page):
@@ -294,7 +570,11 @@ def scrape_buscador_juridico(
 
 
 class BuscadorJuridicoAdapter:
-    """Adaptador orientado a objeto (misma lógica que `scrape_buscador_juridico`)."""
+    """
+    Misma lógica que `scrape_buscador_juridico`.
+    Cada `TesisRecord.texto_tesis` con detalle BJ: primero ``.text-container-html`` (+ rubro
+    ``.rubro-tesis`` / ``strong``), luego ``.documento-content``; último, recorte ``Instancia:`` vía body.
+    """
 
     def search(
         self,
