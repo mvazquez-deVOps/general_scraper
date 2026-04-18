@@ -497,6 +497,15 @@ def render_extraer() -> None:
                         f"Procesando **Fuente:** `{fuente}` | **Índice:** `{indice}` | **Página:** `{page}`"
                     )
 
+                def on_record_bj_save(rec: TesisRecord) -> None:
+                    try:
+                        guardar_registro_bj_almacen(rec)
+                    except Exception as e:
+                        log_step(
+                            f"Error al guardar tesis {rec.numero_registro!r} "
+                            f"(el scraping continúa con la siguiente): {e!r}"
+                        )
+
                 try:
                     with st.spinner("Descargando…"):
                         prefer_pdf = bool(cfg_bulk.get("pdf_directo")) if cfg_bulk else False
@@ -511,9 +520,8 @@ def render_extraer() -> None:
                             prefer_direct_pdf=prefer_pdf,
                             log=log_step,
                             on_progress=on_prog,
+                            on_record=on_record_bj_save,
                         )
-                    for rec in records:
-                        guardar_registro_bj_almacen(rec)
                     prog.markdown(
                         f"Procesando **Fuente:** `{cf}` | **Índice:** `{ci}` | **Listo.**"
                     )

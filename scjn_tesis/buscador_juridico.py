@@ -28,6 +28,7 @@ from scjn_tesis.parsing import extract_registro_digital, parse_organo_epoca_line
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[str, str, int], None]
+OnRecordFn = Callable[[TesisRecord], None]
 
 
 def _default_log(msg: str) -> None:
@@ -87,33 +88,24 @@ def _fetch_bj_detail(
     pdfs_dir: Path | None,
 ) -> tuple[str, list[str]]:
     """
-    Carga detalle del documento; si hay PDFs enlazados o respuesta PDF, descarga a pdfs_dir.
+    Carga detalle: primero texto del DOM; después enlaces PDF y, si aplica, respuesta binaria PDF.
+    Nunca se abandona el texto del cuerpo aunque haya PDFs.
     """
     path_rel = bj_documento_path(indice, registro)
     url = f"https://bj.scjn.gob.mx{path_rel}"
     log(f"Detalle BJ: {url}")
     saved_pdfs: list[str] = []
 
-    try:
-        r0 = api_request.get(url, timeout=120_000)
-        if r0.ok:
-            ct0 = (r0.headers.get("content-type") or "").lower()
-            if "pdf" in ct0 and pdfs_dir and r0.body():
-                name = safe_pdf_filename(url, registro, "detalle")
-                pth = pdfs_dir / name
-                pth.parent.mkdir(parents=True, exist_ok=True)
-                pth.write_bytes(r0.body())
-                log(f"PDF guardado → {pth}")
-                saved_pdfs.append(str(pth))
-                return "[PDF descargado como binario; ver almacen/pdfs/]", saved_pdfs
-    except Exception as e:
-        log(f"GET detalle (probe): {e!r}")
-
     page.goto(url, wait_until="load")
     settle_page(page, headless=headless)
 
     body = page.locator("body").inner_text(timeout=60_000)
     body = trim_footer(body)
+    m = re.search(
+        r"(?is)(Instancia:.*?)(?:UBICACI[ÓO]N|CONT[ÁA]CTANOS|REDES SOCIALES|$)",
+        body,
+    )
+    texto = m.group(1).strip() if m else body.strip()
 
     if pdfs_dir:
         for href in _collect_pdf_links(page):
@@ -121,14 +113,25 @@ def _fetch_bj_detail(
             out = download_file(api_request, href, pdfs_dir / name, log=log)
             if out:
                 saved_pdfs.append(str(out))
+        try:
+            r0 = api_request.get(url, timeout=120_000)
+            if r0.ok and r0.body() and pdfs_dir:
+                ct0 = (r0.headers.get("content-type") or "").lower()
+                if "pdf" in ct0:
+                    name = safe_pdf_filename(url, registro, "detalle")
+                    pth = pdfs_dir / name
+                    pth.parent.mkdir(parents=True, exist_ok=True)
+                    pth.write_bytes(r0.body())
+                    log(f"PDF guardado → {pth}")
+                    # Evitar duplicar si el mismo path ya se registró
+                    s = str(pth)
+                    if s not in saved_pdfs:
+                        saved_pdfs.append(s)
+        except Exception as e:
+            log(f"GET detalle (PDF binario): {e!r}")
 
-    m = re.search(
-        r"(?is)(Instancia:.*?)(?:UBICACI[ÓO]N|CONT[ÁA]CTANOS|REDES SOCIALES|$)",
-        body,
-    )
-    texto = m.group(1).strip() if m else body.strip()
     if saved_pdfs:
-        texto = texto + "\n\n[PDFs adjuntos: " + ", ".join(saved_pdfs) + "]"
+        texto = texto + "\n\nArchivo PDF descargado en almacen/pdfs"
     return texto, saved_pdfs
 
 
@@ -144,6 +147,7 @@ def scrape_buscador_juridico(
     prefer_direct_pdf: bool = False,
     log: LogFn | None = None,
     on_progress: ProgressFn | None = None,
+    on_record: OnRecordFn | None = None,
 ) -> tuple[list[TesisRecord], str | None]:
     """
     Recorre páginas 1..max_pages. Detiene si no hay tarjetas de resultado (fin natural).
@@ -237,6 +241,7 @@ def scrape_buscador_juridico(
                         continue
                     seen.add(reg)
 
+                    # Respaldo: rubro y resumen del listado si el detalle falla
                     texto = parsed["resumen_lista"]
                     pdf_paths: list[str] = []
                     if fetch_detail:
@@ -251,7 +256,7 @@ def scrape_buscador_juridico(
                                 pdfs_dir,
                             )
                         except Exception as e:
-                            log(f"Detalle {reg} falló: {e!r}")
+                            log(f"Detalle {reg} falló: {e!r} (se conserva resumen de listado).")
                         page.goto(list_url, wait_until="load")
                         settle_page(page, headless=headless)
 
@@ -274,6 +279,11 @@ def scrape_buscador_juridico(
                         extra=extra,
                     )
                     records.append(rec)
+                    if on_record:
+                        try:
+                            on_record(rec)
+                        except Exception as e:
+                            log(f"on_record {reg}: {e!r}")
                     time.sleep(0.15)
 
         finally:
@@ -299,6 +309,7 @@ class BuscadorJuridicoAdapter:
         prefer_direct_pdf: bool = False,
         log: LogFn | None = None,
         on_progress: ProgressFn | None = None,
+        on_record: OnRecordFn | None = None,
     ) -> tuple[list[TesisRecord], str | None]:
         return scrape_buscador_juridico(
             params,
@@ -311,4 +322,5 @@ class BuscadorJuridicoAdapter:
             prefer_direct_pdf=prefer_direct_pdf,
             log=log,
             on_progress=on_progress,
+            on_record=on_record,
         )
