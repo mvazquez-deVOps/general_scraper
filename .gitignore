@@ -1,0 +1,6 @@
+.env
+.venv/
+.env.example
+__pycache__/
+*.pyc
+.training_local_output/
